@@ -46,7 +46,9 @@ android {
             create("release") {
                 keyAlias = keystoreProperties["keyAlias"] as String
                 keyPassword = keystoreProperties["keyPassword"] as String
-                storeFile = file(keystoreProperties["storeFile"] as String)
+                // rootProject.file(): il percorso in key.properties e' relativo a
+                // android/ (dove la CI genera release-key.jks), non a android/app/.
+                storeFile = (keystoreProperties["storeFile"] as String).let { rootProject.file(it) }
                 storePassword = keystoreProperties["storePassword"] as String
             }
         }

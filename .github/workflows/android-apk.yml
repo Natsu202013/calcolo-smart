@@ -131,13 +131,21 @@ jobs:
               -storepass "$KS_PASS" -keypass "$K_PASS" \
               -dname "CN=Calcolo Smart, OU=Mobile, O=Calcolo Smart, L=Milano, C=IT"
           fi
+          # Percorso ASSOLUTO: evita ogni ambiguita' di risoluzione di Gradle
+          # (file() nel modulo app risolve da android/app/, non da android/).
+          STORE_ABS="$PROJECT_ROOT/android/release-key.jks"
+          test -f "$STORE_ABS" || { echo "❌ keystore non trovato in $STORE_ABS"; exit 1; }
           cat > key.properties <<EOF
           storePassword=$KS_PASS
           keyPassword=$K_PASS
           keyAlias=$K_ALIAS
-          storeFile=release-key.jks
+          storeFile=$STORE_ABS
           EOF
           echo "✅ key.properties creato"
+          echo "   storeFile = $STORE_ABS"
+          keytool -list -keystore "$STORE_ABS" -storepass "$KS_PASS" -alias "$K_ALIAS" > /dev/null 2>&1 \
+            && echo "✅ keystore valido e leggibile" \
+            || { echo "❌ keystore non valido"; exit 1; }
 
       - name: 9. Compila APK release
         run: |
