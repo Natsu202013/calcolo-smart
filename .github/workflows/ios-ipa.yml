@@ -1,66 +1,141 @@
-name: Build iOS IPA (unsigned)
+name: Build iOS IPA
 
 on:
+  # Avvio manuale da pulsante "Run workflow"
   workflow_dispatch:
+  # Build automatica ad ogni push su main
   push:
-    branches: [ main ]
-    paths: [ 'lib/**', 'ios/**', 'pubspec.yaml', '.github/workflows/ios-ipa.yml' ]
+    branches: [main]
+    paths:
+      - 'lib/**'
+      - 'ios/**'
+      - 'pubspec.yaml'
+      - '.github/workflows/ios-ipa.yml'
+  # Rilascio: crea una GitHub Release con l'IPA allegato
+  release:
+    types: [published]
+
+permissions:
+  contents: write
 
 jobs:
-  build-ipa:
-    name: Build unsigned IPA
+  build-ios:
+    name: Compila app iOS e impacchetta IPA
+    # Unico tipo di runner che possiede Xcode e gli SDK iOS
     runs-on: macos-15
-    timeout-minutes: 40
+    timeout-minutes: 45
 
     steps:
-      - name: Checkout
+      - name: 1. Scarica il codice
         uses: actions/checkout@v4
 
-      - name: Select latest stable Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app
-
-      - name: Show toolchain versions
+      - name: 2. Mostra versioni toolchain
         run: |
-          xcodebuild -version
-          flutter --version || true
+          echo "=== macOS ===" && sw_vers
+          echo "=== Xcode ===" && xcodebuild -version
+          echo "=== SDK iOS ===" && xcrun --sdk iphoneos --show-sdk-version
+          echo "=== Ruby ===" && ruby --version
+          echo "=== CocoaPods ===" && (pod --version || echo "pod non ancora installato")
 
-      - name: Set up Flutter
+      - name: 3. Installa Flutter 3.35.4
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.35.4'
           channel: stable
           cache: true
 
-      - name: Install dependencies
+      - name: 4. Prepara gli artefatti iOS
+        run: flutter precache --ios
+
+      - name: 5. Risolve le dipendenze
         run: flutter pub get
 
-      - name: Analyze and test
+      - name: 6. Verifica qualita' del codice
         run: |
           flutter analyze
           flutter test
 
-      - name: Build iOS app (no codesign)
+      - name: 7. Allinea i pod iOS
+        run: |
+          cd ios
+          # Flutter genera il Podfile se assente; pod install scarica i plugin nativi
+          if [ ! -f Podfile ]; then flutter build ios --config-only --no-codesign; fi
+          pod install --repo-update
+
+      - name: 8. Compila in release senza firma
         run: |
           flutter build ios --release --no-codesign \
             --dart-define=flutter.inspector.structuredErrors=false
 
-      - name: Package unsigned IPA
+      - name: 9. Impacchetta il file IPA
+        id: package
         run: |
+          set -euo pipefail
           APP_PATH="build/ios/iphoneos/Runner.app"
           if [ ! -d "$APP_PATH" ]; then
-            echo "Runner.app non trovato"; exit 1
+            echo "::error::Runner.app non trovato in $APP_PATH"
+            find build/ios -maxdepth 3 -name "*.app" || true
+            exit 1
           fi
+
           mkdir -p build/ipa/Payload
           cp -R "$APP_PATH" build/ipa/Payload/
           cd build/ipa
-          zip -qry ../CalcoloSmart-unsigned.ipa Payload
+          zip -qry ../CalcoloSmart.ipa Payload
           cd ../..
-          ls -lh build/CalcoloSmart-unsigned.ipa
-          shasum -a 256 build/CalcoloSmart-unsigned.ipa
 
-      - name: Upload IPA artifact
+          # copia anche la .app compressa (utile per il sideload diretto)
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" build/CalcoloSmart.app.zip
+
+          ls -lh build/CalcoloSmart.ipa build/CalcoloSmart.app.zip
+          shasum -a 256 build/CalcoloSmart.ipa | tee build/CalcoloSmart.ipa.sha256
+
+          SIZE=$(du -h build/CalcoloSmart.ipa | cut -f1)
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
+
+      - name: 10. Carica l'IPA come artifact scaricabile
         uses: actions/upload-artifact@v4
         with:
-          name: CalcoloSmart-unsigned-ipa
-          path: build/CalcoloSmart-unsigned.ipa
+          name: CalcoloSmart-ipa
+          path: |
+            build/CalcoloSmart.ipa
+            build/CalcoloSmart.app.zip
+            build/CalcoloSmart.ipa.sha256
           retention-days: 30
+          if-no-files-found: error
+
+      - name: 11. Allega l'IPA alla Release (solo su release)
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/CalcoloSmart.ipa
+            build/CalcoloSmart.app.zip
+          name: Calcolo Smart ${{ github.ref_name }}
+          body: |
+            ## Calcolo Smart ${{ github.ref_name }}
+
+            Build iOS (IPA non firmato).
+
+            - `CalcoloSmart.ipa` — pacchetto per il sideload
+            - `CalcoloSmart.app.zip` — bundle .app compresso
+
+            ### Firma
+            L'IPA non e' firmato: per installarlo su un iPhone serve firmarlo con
+            Sideloadly / AltStore (account Apple gratuito, 7 giorni) oppure con un
+            certificato Apple Developer (1 anno).
+
+      - name: 12. Riepilogo
+        run: |
+          {
+            echo "### ✅ Build iOS completata"
+            echo ""
+            echo "| Voce | Valore |"
+            echo "|---|---|"
+            echo "| Dimensione IPA | ${{ steps.package.outputs.size }} |"
+            echo "| Bundle ID | com.calcolosmart.calculator |"
+            echo "| Flutter | 3.35.4 |"
+            echo "| Firma | nessuna (unsigned) |"
+            echo ""
+            echo "Scarica l'IPA dalla sezione **Artifacts** qui sotto."
+          } >> "$GITHUB_STEP_SUMMARY"
