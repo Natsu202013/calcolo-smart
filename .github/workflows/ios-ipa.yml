@@ -1,27 +1,18 @@
 name: Build iOS IPA
 
 on:
-  # Avvio manuale da pulsante "Run workflow"
+  # Pulsante "Run workflow" nella scheda Actions
   workflow_dispatch:
   # Build automatica ad ogni push su main
   push:
     branches: [main]
-    paths:
-      - 'lib/**'
-      - 'ios/**'
-      - 'pubspec.yaml'
-      - '.github/workflows/ios-ipa.yml'
-  # Rilascio: crea una GitHub Release con l'IPA allegato
-  release:
-    types: [published]
 
 permissions:
   contents: write
 
 jobs:
   build-ios:
-    name: Compila app iOS e impacchetta IPA
-    # Unico tipo di runner che possiede Xcode e gli SDK iOS
+    name: Compila IPA (macOS)
     runs-on: macos-15
     timeout-minutes: 45
 
@@ -29,13 +20,30 @@ jobs:
       - name: 1. Scarica il codice
         uses: actions/checkout@v4
 
-      - name: 2. Mostra versioni toolchain
+      # ---------------------------------------------------------------
+      # RETe DI SICUREZZA: trova da sola la cartella del progetto.
+      # Funziona sia se i file sono alla radice, sia se sono dentro
+      # una sottocartella (es. calcolo-smart/lib/...).
+      # ---------------------------------------------------------------
+      - name: 2. Trova la cartella del progetto
         run: |
-          echo "=== macOS ===" && sw_vers
-          echo "=== Xcode ===" && xcodebuild -version
-          echo "=== SDK iOS ===" && xcrun --sdk iphoneos --show-sdk-version
-          echo "=== Ruby ===" && ruby --version
-          echo "=== CocoaPods ===" && (pod --version || echo "pod non ancora installato")
+          set -euo pipefail
+          CANDIDATE=$(find . -name pubspec.yaml \
+            -not -path '*/.dart_tool/*' \
+            -not -path '*/build/*' \
+            -not -path '*/Pods/*' \
+            | head -1)
+          if [ -z "$CANDIDATE" ]; then
+            echo "::error::pubspec.yaml non trovato nel repository."
+            echo "Verifica di aver caricato la cartella lib/ e pubspec.yaml."
+            find . -maxdepth 3 -type d | head -30
+            exit 1
+          fi
+          PROJECT_ROOT=$(cd "$(dirname "$CANDIDATE")" && pwd)
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+          echo "✅ Progetto trovato in: $PROJECT_ROOT"
+          echo "--- contenuto ---"
+          ls -A "$PROJECT_ROOT"
 
       - name: 3. Installa Flutter 3.35.4
         uses: subosito/flutter-action@v2
@@ -44,98 +52,69 @@ jobs:
           channel: stable
           cache: true
 
-      - name: 4. Prepara gli artefatti iOS
-        run: flutter precache --ios
-
-      - name: 5. Risolve le dipendenze
-        run: flutter pub get
-
-      - name: 6. Verifica qualita' del codice
+      - name: 4. Versioni toolchain
         run: |
-          flutter analyze
-          flutter test
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          flutter --version
 
-      - name: 7. Allinea i pod iOS
-        run: |
-          cd ios
-          # Flutter genera il Podfile se assente; pod install scarica i plugin nativi
-          if [ ! -f Podfile ]; then flutter build ios --config-only --no-codesign; fi
-          pod install --repo-update
+      - name: 5. Dipendenze
+        run: cd "$PROJECT_ROOT" && flutter pub get
 
-      - name: 8. Compila in release senza firma
+      - name: 6. Analisi e test
+        run: cd "$PROJECT_ROOT" && flutter analyze && flutter test
+
+      - name: 7. Compila in release senza firma
         run: |
+          cd "$PROJECT_ROOT"
           flutter build ios --release --no-codesign \
             --dart-define=flutter.inspector.structuredErrors=false
 
-      - name: 9. Impacchetta il file IPA
-        id: package
+      - name: 8. Impacchetta l'IPA
         run: |
           set -euo pipefail
-          APP_PATH="build/ios/iphoneos/Runner.app"
-          if [ ! -d "$APP_PATH" ]; then
-            echo "::error::Runner.app non trovato in $APP_PATH"
-            find build/ios -maxdepth 3 -name "*.app" || true
+          cd "$PROJECT_ROOT"
+          APP="build/ios/iphoneos/Runner.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::Runner.app non trovato"
+            find build -maxdepth 4 -name "*.app" || true
             exit 1
           fi
-
           mkdir -p build/ipa/Payload
-          cp -R "$APP_PATH" build/ipa/Payload/
-          cd build/ipa
-          zip -qry ../CalcoloSmart.ipa Payload
-          cd ../..
+          cp -R "$APP" build/ipa/Payload/
+          ( cd build/ipa && zip -qry ipa.zip Payload )
+          mv build/ipa/ipa.zip "$GITHUB_WORKSPACE/CalcoloSmart.ipa"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" \
+            "$GITHUB_WORKSPACE/CalcoloSmart.app.zip"
+          cd "$GITHUB_WORKSPACE"
+          ls -lh CalcoloSmart.ipa CalcoloSmart.app.zip
+          shasum -a 256 CalcoloSmart.ipa > CalcoloSmart.ipa.sha256
+          cat CalcoloSmart.ipa.sha256
+          du -h CalcoloSmart.ipa | cut -f1 >> "$GITHUB_ENV" 2>/dev/null || true
 
-          # copia anche la .app compressa (utile per il sideload diretto)
-          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" build/CalcoloSmart.app.zip
-
-          ls -lh build/CalcoloSmart.ipa build/CalcoloSmart.app.zip
-          shasum -a 256 build/CalcoloSmart.ipa | tee build/CalcoloSmart.ipa.sha256
-
-          SIZE=$(du -h build/CalcoloSmart.ipa | cut -f1)
-          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
-
-      - name: 10. Carica l'IPA come artifact scaricabile
+      - name: 9. Carica l'IPA come artifact
         uses: actions/upload-artifact@v4
         with:
           name: CalcoloSmart-ipa
           path: |
-            build/CalcoloSmart.ipa
-            build/CalcoloSmart.app.zip
-            build/CalcoloSmart.ipa.sha256
+            CalcoloSmart.ipa
+            CalcoloSmart.app.zip
+            CalcoloSmart.ipa.sha256
           retention-days: 30
           if-no-files-found: error
 
-      - name: 11. Allega l'IPA alla Release (solo su release)
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            build/CalcoloSmart.ipa
-            build/CalcoloSmart.app.zip
-          name: Calcolo Smart ${{ github.ref_name }}
-          body: |
-            ## Calcolo Smart ${{ github.ref_name }}
-
-            Build iOS (IPA non firmato).
-
-            - `CalcoloSmart.ipa` — pacchetto per il sideload
-            - `CalcoloSmart.app.zip` — bundle .app compresso
-
-            ### Firma
-            L'IPA non e' firmato: per installarlo su un iPhone serve firmarlo con
-            Sideloadly / AltStore (account Apple gratuito, 7 giorni) oppure con un
-            certificato Apple Developer (1 anno).
-
-      - name: 12. Riepilogo
+      - name: 10. Riepilogo
         run: |
           {
-            echo "### ✅ Build iOS completata"
+            echo "## ✅ IPA generato"
             echo ""
-            echo "| Voce | Valore |"
-            echo "|---|---|"
-            echo "| Dimensione IPA | ${{ steps.package.outputs.size }} |"
-            echo "| Bundle ID | com.calcolosmart.calculator |"
-            echo "| Flutter | 3.35.4 |"
-            echo "| Firma | nessuna (unsigned) |"
+            echo "Scarica il file dalla sezione **Artifacts** in fondo a questa pagina."
             echo ""
-            echo "Scarica l'IPA dalla sezione **Artifacts** qui sotto."
+            echo "- \`CalcoloSmart.ipa\` — pacchetto iOS"
+            echo "- \`CalcoloSmart.app.zip\` — bundle .app"
+            echo "- \`CalcoloSmart.ipa.sha256\` — checksum"
+            echo ""
+            echo "Bundle ID: \`com.calcolosmart.calculator\`"
+            echo ""
+            echo "> L'IPA non è firmato: per installarlo serve Sideloadly o AltStore."
           } >> "$GITHUB_STEP_SUMMARY"
