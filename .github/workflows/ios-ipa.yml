@@ -90,7 +90,8 @@ jobs:
           ls -lh CalcoloSmart.ipa CalcoloSmart.app.zip
           shasum -a 256 CalcoloSmart.ipa > CalcoloSmart.ipa.sha256
           cat CalcoloSmart.ipa.sha256
-          du -h CalcoloSmart.ipa | cut -f1 >> "$GITHUB_ENV" 2>/dev/null || true
+          SIZE=$(du -h CalcoloSmart.ipa | cut -f1 | tr -d ' ')
+          echo "IPA_SIZE=$SIZE" >> "$GITHUB_ENV"
 
       - name: 9. Carica l'IPA come artifact
         uses: actions/upload-artifact@v4
