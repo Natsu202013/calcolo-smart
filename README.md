@@ -7,6 +7,17 @@ persistente e temi chiaro/scuro.
 - **Flutter**: 3.35.4 / Dart 3.9.2
 - **Piattaforme**: Android, iOS, Web
 
+## Download
+
+Tutti i file sono nella pagina **Releases** del repository:
+
+| File | Piattaforma | Note |
+|---|---|---|
+| [`CalcoloSmart.apk`](https://github.com/Natsu202013/calcolo-smart/releases/download/v1.0.0/CalcoloSmart.apk) | Android | firmato, installabile (Android 7+) |
+| [`CalcoloSmart.apk.sha256`](https://github.com/Natsu202013/calcolo-smart/releases/download/v1.0.0/CalcoloSmart.apk.sha256) | — | checksum di verifica |
+| [`CalcoloSmart.ipa`](https://github.com/Natsu202013/calcolo-smart/releases/download/v1.0.0/CalcoloSmart.ipa) | iOS | **non firmato**, va rifirmato (Sideloadly) |
+| [`CalcoloSmart.app.zip`](https://github.com/Natsu202013/calcolo-smart/releases/download/v1.0.0/CalcoloSmart.app.zip) | iOS | bundle `.app` per rifirma manuale |
+
 ---
 
 ## Struttura del progetto
@@ -189,6 +200,25 @@ Poi sostituisci lo step 8 con la firma:
 
 Con `--export-method ad-hoc` ottieni un IPA installabile su dispositivi
 registrati nel profilo, senza passare da TestFlight.
+
+### Firma dell'APK Android
+
+L'APK è **firmato** e installabile. La firma usa un keystore stabile salvato
+nei secret del repository, quindi **tutti gli aggiornamenti futuri avranno la
+stessa firma** e si installeranno sopra la versione precedente.
+
+| Secret | Contenuto |
+|---|---|
+| `ANDROID_KEYSTORE_BASE64` | keystore `.jks` in base64 (`base64 -w0 upload.jks`) |
+| `ANDROID_KEYSTORE_PASSWORD` | password del keystore |
+| `ANDROID_KEY_ALIAS` | alias della chiave (`calcolosmart`) |
+| `ANDROID_KEY_PASSWORD` | password della chiave |
+
+Se i secret non sono impostati, il workflow genera un keystore monouso: la build
+funziona ma l'APK **non** potrà aggiornare quello precedente.
+
+> ⚠️ **Conserva il keystore**: senza di esso non puoi più pubblicare
+> aggiornamenti installabili sopra l'app già installata dagli utenti.
 
 ### Cambiare la versione
 
