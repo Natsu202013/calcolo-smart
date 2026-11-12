@@ -1,0 +1,185 @@
+name: Build Android APK
+
+on:
+  # Pulsante "Run workflow" nella scheda Actions
+  workflow_dispatch:
+    inputs:
+      attach_to_release:
+        description: 'Allega APK alla release esistente (tag)'
+        required: false
+        default: 'v1.0.0'
+      release_tag:
+        description: 'Tag della release a cui allegare (vuoto = nessuna)'
+        required: false
+        default: 'v1.0.0'
+  # Build automatica ad ogni push su main
+  push:
+    branches: [main]
+    paths:
+      - 'lib/**'
+      - 'android/**'
+      - 'pubspec.yaml'
+      - '.github/workflows/android-apk.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Compila APK (Android)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    env:
+      # Firma release: keystore generato al volo.
+      # Per firmare con la tua chiave, imposta questi 4 secret nel repository
+      # (Settings -> Secrets and variables -> Actions) e il workflow li usera'.
+      KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+    steps:
+      - name: 1. Scarica il codice
+        uses: actions/checkout@v4
+
+      - name: 2. Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 3. Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 4. Installa Flutter 3.35.4
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.4'
+          channel: stable
+          cache: true
+
+      - name: 5. Trova la cartella del progetto
+        run: |
+          set -euo pipefail
+          CANDIDATE=$(find . -name pubspec.yaml \
+            -not -path '*/.dart_tool/*' \
+            -not -path '*/build/*' | head -1)
+          if [ -z "$CANDIDATE" ]; then
+            echo "::error::pubspec.yaml non trovato"
+            exit 1
+          fi
+          PROJECT_ROOT=$(cd "$(dirname "$CANDIDATE")" && pwd)
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+          echo "✅ Progetto in: $PROJECT_ROOT"
+
+      - name: 6. Dipendenze
+        run: cd "$PROJECT_ROOT" && flutter pub get
+
+      - name: 7. Analisi e test
+        run: cd "$PROJECT_ROOT" && flutter analyze && flutter test
+
+      # -----------------------------------------------------------------
+      # Firma: usa i secret se presenti, altrimenti genera un keystore
+      # monouso (l'APK sara' firmato e installabile comunque).
+      # -----------------------------------------------------------------
+      - name: 8. Prepara la firma
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT/android"
+          if [ -n "${KEYSTORE_BASE64:-}" ]; then
+            echo "🔐 Uso il keystore dai secret"
+            echo "$KEYSTORE_BASE64" | base64 -d > release-key.jks
+            KS_PASS="$KEYSTORE_PASSWORD"
+            K_ALIAS="$KEY_ALIAS"
+            K_PASS="$KEY_PASSWORD"
+          else
+            echo "🔧 Nessun secret: genero un keystore monouso"
+            KS_PASS="calcolosmart$(date +%s)"
+            K_ALIAS="calcolosmart"
+            K_PASS="$KS_PASS"
+            keytool -genkeypair -v \
+              -keystore release-key.jks \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -alias "$K_ALIAS" \
+              -storepass "$KS_PASS" -keypass "$K_PASS" \
+              -dname "CN=Calcolo Smart, OU=Mobile, O=Calcolo Smart, L=Milano, C=IT"
+          fi
+          cat > key.properties <<EOF
+          storePassword=$KS_PASS
+          keyPassword=$K_PASS
+          keyAlias=$K_ALIAS
+          storeFile=release-key.jks
+          EOF
+          echo "✅ key.properties creato"
+
+      - name: 9. Compila APK release
+        run: |
+          cd "$PROJECT_ROOT"
+          flutter build apk --release \
+            --dart-define=flutter.inspector.structuredErrors=false
+          ls -lh build/app/outputs/flutter-apk/
+
+      - name: 10. Prepara gli artefatti
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+          if [ ! -f "$APK" ]; then
+            echo "::error::APK non trovato"
+            find build -name "*.apk" || true
+            exit 1
+          fi
+          mv "$APK" "$GITHUB_WORKSPACE/CalcoloSmart.apk"
+          cd "$GITHUB_WORKSPACE"
+          ls -lh CalcoloSmart.apk
+          shasum -a 256 CalcoloSmart.apk | tee CalcoloSmart.apk.sha256
+          # info sull'APK
+          if command -v aapt >/dev/null 2>&1; then
+            aapt dump badging CalcoloSmart.apk | head -5 || true
+          fi
+
+      - name: 11. Verifica firma APK
+        run: |
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -r | head -1)
+          if [ -n "$APKSIGNER" ]; then
+            "$APKSIGNER" verify --verbose CalcoloSmart.apk | head -12
+          else
+            echo "apksigner non trovato, salto la verifica"
+          fi
+
+      - name: 12. Carica APK come artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CalcoloSmart-apk
+          path: |
+            CalcoloSmart.apk
+            CalcoloSmart.apk.sha256
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: 13. Allega l'APK alla release
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          echo "Allego a release $TAG"
+          gh release upload "$TAG" CalcoloSmart.apk CalcoloSmart.apk.sha256 --clobber || {
+            echo "::warning::Release $TAG non trovata, l'APK resta negli artifact"
+          }
+
+      - name: 14. Riepilogo
+        run: |
+          {
+            echo "## ✅ APK generato"
+            echo ""
+            echo "| Voce | Valore |"
+            echo "|---|---|"
+            echo "| File | \`CalcoloSmart.apk\` |"
+            echo "| Package | \`com.calcolosmart.calculator\` |"
+            echo "| Firma | $([ -n "${KEYSTORE_BASE64:-}" ] && echo 'secret del repository' || echo 'keystore monouso') |"
+            echo ""
+            echo "Scarica dalla sezione **Artifacts** in fondo a questa pagina."
+          } >> "$GITHUB_STEP_SUMMARY"
