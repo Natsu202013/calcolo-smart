@@ -1,0 +1,66 @@
+name: Build iOS IPA (unsigned)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths: [ 'lib/**', 'ios/**', 'pubspec.yaml', '.github/workflows/ios-ipa.yml' ]
+
+jobs:
+  build-ipa:
+    name: Build unsigned IPA
+    runs-on: macos-15
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select latest stable Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Show toolchain versions
+        run: |
+          xcodebuild -version
+          flutter --version || true
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.4'
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze and test
+        run: |
+          flutter analyze
+          flutter test
+
+      - name: Build iOS app (no codesign)
+        run: |
+          flutter build ios --release --no-codesign \
+            --dart-define=flutter.inspector.structuredErrors=false
+
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH="build/ios/iphoneos/Runner.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Runner.app non trovato"; exit 1
+          fi
+          mkdir -p build/ipa/Payload
+          cp -R "$APP_PATH" build/ipa/Payload/
+          cd build/ipa
+          zip -qry ../CalcoloSmart-unsigned.ipa Payload
+          cd ../..
+          ls -lh build/CalcoloSmart-unsigned.ipa
+          shasum -a 256 build/CalcoloSmart-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CalcoloSmart-unsigned-ipa
+          path: build/CalcoloSmart-unsigned.ipa
+          retention-days: 30
